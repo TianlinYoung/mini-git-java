@@ -11,8 +11,10 @@ import java.text.SimpleDateFormat;
 
 public class Repository {
     private String name;
-    private Commit head;
+    private HistoryNode head;
     private int size;
+    private Map<String, List<Commit>> branches;
+    private String currentBranch;
 
     // Behavior:
     //     Constructs a new empty Repository with the given name.
@@ -27,6 +29,9 @@ public class Repository {
         this.name = name;
         this.head = null;
         this.size = 0;
+        this.branches = new TreeMap<>();
+        this.currentBranch = "main";
+        this.branches.put("main", new ArrayList<>());
     }
 
 
@@ -39,7 +44,7 @@ public class Repository {
         if (this.head == null) {
             return null;
         }
-        return this.head.id;
+        return this.head.commit.id;
     }
 
 
@@ -62,7 +67,7 @@ public class Repository {
         if (head == null) {
             return name + " - No commits";
         }
-        return this.name + " - Current head: " + this.head.toString();
+        return this.name + " - Current head: " + this.head.commit.toString();
     }
 
 
@@ -78,9 +83,9 @@ public class Repository {
         if (targetId == null) {
             throw new IllegalArgumentException();
         }
-        Commit curr = head;
+        HistoryNode curr = head;
         while(curr != null) {
-            if (curr.id.equals(targetId)) {
+            if (curr.commit.id.equals(targetId)) {
                 return true;
             }
             curr = curr.past;
@@ -110,10 +115,10 @@ public class Repository {
         }
 
         int count = 1;
-        String result = head.toString();
-        Commit curr = head.past;
+        String result = head.commit.toString();
+        HistoryNode curr = head.past;
         while (curr != null && count < n) {
-            result += "\n" + curr.toString();
+            result += "\n" + curr.commit.toString();
             curr = curr.past;
             count ++;
         }
@@ -135,9 +140,9 @@ public class Repository {
             throw new IllegalArgumentException();
         }
 
-        this.head = new Commit(message, head);
+        this.head = new HistoryNode(new Commit(message), head);
         this.size++;
-        return this.head.id;
+        return this.head.commit.id;
     }
 
 
@@ -160,15 +165,15 @@ public class Repository {
             return false;
         }
 
-        if (head.id.equals(targetId)) {
+        if (head.commit.id.equals(targetId)) {
             head = head.past;
             size --;
             return true;
         }
 
-        Commit curr = head;
+        HistoryNode curr = head;
         while (curr.past != null) {
-            if (curr.past.id.equals(targetId)) {
+            if (curr.past.commit.id.equals(targetId)) {
                 curr.past = curr.past.past;
                 size --;
                 return true;
@@ -205,13 +210,13 @@ public class Repository {
             return;
         }
 
-        Commit thisCurr = this.head;
-        Commit otherCurr = other.head;
+        HistoryNode thisCurr = this.head;
+        HistoryNode otherCurr = other.head;
 
-        Commit finalHead = null;
-        Commit finalCurr = null;
+        HistoryNode finalHead = null;
+        HistoryNode finalCurr = null;
         
-        if (thisCurr.timeStamp > otherCurr.timeStamp) {
+        if (thisCurr.commit.timeStamp > otherCurr.commit.timeStamp) {
             finalHead = thisCurr;
             thisCurr = thisCurr.past;
         } else {
@@ -221,7 +226,7 @@ public class Repository {
         finalCurr = finalHead;
 
         while (thisCurr != null && otherCurr != null) {
-            if (thisCurr.timeStamp > otherCurr.timeStamp) {
+            if (thisCurr.commit.timeStamp > otherCurr.commit.timeStamp) {
                 finalCurr.past = thisCurr;
                 thisCurr = thisCurr.past;
             } else {
@@ -244,6 +249,106 @@ public class Repository {
         other.size = 0;
     }
 
+
+    // Returns the name of the checked-out branch.
+    public String getCurrentBranch() {
+        return currentBranch;
+    }
+
+    // Returns branch names in alphabetical order. Changing the returned list
+    // does not change the repository.
+    public List<String> listBranches() {
+        return new ArrayList<>(branches.keySet());
+    }
+
+    // Creates a branch at the current history without checking it out.
+    // Throws IllegalArgumentException for null, blank, or duplicate names.
+    public void createBranch(String branchName) {
+        if (branchName == null || branchName.trim().isEmpty()
+                || branches.containsKey(branchName)) {
+            throw new IllegalArgumentException();
+        }
+        branches.put(branchName, snapshot());
+    }
+
+    // Saves the current history and checks out an existing branch.
+    // Throws IllegalArgumentException if the branch does not exist.
+    public void checkoutBranch(String branchName) {
+        requireBranch(branchName);
+        branches.put(currentBranch, snapshot());
+        currentBranch = branchName;
+        restore(branches.get(branchName));
+    }
+
+    // Merges an existing branch into the current branch, newest timestamp first.
+    // Shared commits appear only once; equal timestamps prefer the source branch.
+    // The source branch is preserved. Merging the current branch is a no-op.
+    // Throws IllegalArgumentException if the source branch does not exist.
+    public void mergeBranch(String branchName) {
+        requireBranch(branchName);
+        if (branchName.equals(currentBranch)) {
+            return;
+        }
+        List<Commit> current = snapshot();
+        List<Commit> source = branches.get(branchName);
+        List<Commit> merged = new ArrayList<>();
+        Set<Commit> seen = new HashSet<>();
+        int i = 0;
+        int j = 0;
+        while (i < current.size() || j < source.size()) {
+            Commit next;
+            if (j == source.size() || (i < current.size()
+                    && current.get(i).timeStamp > source.get(j).timeStamp)) {
+                next = current.get(i);
+                i++;
+            } else {
+                next = source.get(j);
+                j++;
+            }
+            if (seen.add(next)) {
+                merged.add(next);
+            }
+        }
+        restore(merged);
+    }
+
+    // Branches save ordered commits. Each active history uses separate list
+    // nodes so changing one history never rewires another repository or branch.
+    // Checkout and merge preserve commit IDs and timestamps.
+    private List<Commit> snapshot() {
+        List<Commit> history = new ArrayList<>();
+        HistoryNode curr = head;
+        while (curr != null) {
+            history.add(curr.commit);
+            curr = curr.past;
+        }
+        return history;
+    }
+
+    private void restore(List<Commit> history) {
+        head = null;
+        for (int i = history.size() - 1; i >= 0; i--) {
+            head = new HistoryNode(history.get(i), head);
+        }
+        size = history.size();
+    }
+
+    private void requireBranch(String branchName) {
+        if (branchName == null || !branches.containsKey(branchName)) {
+            throw new IllegalArgumentException();
+        }
+    }
+
+
+    private static class HistoryNode {
+        public final Commit commit;
+        public HistoryNode past;
+
+        public HistoryNode(Commit commit, HistoryNode past) {
+            this.commit = commit;
+            this.past = past;
+        }
+    }
 
     /**
      * DO NOT MODIFY
